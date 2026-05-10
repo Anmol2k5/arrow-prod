@@ -1,0 +1,5 @@
+node_modules/
+dist/
+dist2/
+clicky-windows-2/
+*.log
