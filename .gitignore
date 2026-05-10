@@ -1,5 +1,12 @@
 node_modules/
 dist/
 dist2/
-clicky-windows-2/
 *.log
+.env
+.env.local
+__pycache__/
+*.pyc
+build/
+bin/
+*.exe
+clicky-windows-2/
