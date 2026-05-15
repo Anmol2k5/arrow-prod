@@ -31,6 +31,8 @@ from tutor_features import (
     multilang, workflow_capture, collab, memory,
 )
 import skills as skills_pkg
+from ai.gemini_live_integration import GeminiLiveIntegration
+from audio.live_player import AsyncLiveAudioPlayer
 
 
 def _build_system_prompt(
@@ -137,6 +139,33 @@ STYLE: warm, concise, teacher-y. 1-2 sentences per step. No markdown bullets
 unless genuinely listing options.{_code_addendum(code_active)}{_lang_addendum(language_code)}{memory.format_for_prompt(memory_text)}{memory.instructions()}{extra}"""
 
 
+def _build_live_system_prompt() -> str:
+    """System prompt optimized for Gemini Live multimodal real-time conversation."""
+    today = datetime.now().strftime("%A, %B %d, %Y")
+    return f"""You are Clicky, a visual AI assistant running on Windows.
+Today is {today}.
+
+You are in LIVE MODE — a real-time voice and vision conversation with the user.
+
+CAPABILITIES:
+- You receive continuous audio from the user's microphone
+- You receive periodic screenshots of the user's screen every few seconds
+- You can speak back to the user in real-time
+- You can control the computer through tool calls (click, type, navigate, scroll, keypress)
+
+RULES:
+1. Respond naturally and conversationally — this is a voice conversation
+2. When you see screenshots, describe what's on screen and help the user navigate
+3. Keep responses concise (1-3 sentences) — avoid long monologues
+4. If the user asks you to do something on screen, use the available tools
+5. When using tools, use logical screen coordinates (the same coordinate system
+   that Windows uses for mouse positioning)
+6. If you're unsure about coordinates, describe what you see and ask for clarification
+7. Be warm, helpful, and teacher-like — you're guiding the user
+
+STYLE: friendly, concise, conversational. Never lecture. End turns naturally."""
+
+
 def _code_addendum(active: bool) -> str:
     if not active:
         return ""
@@ -147,6 +176,18 @@ def _code_addendum(active: bool) -> str:
 def _lang_addendum(code: str) -> str:
     from tutor_features.multilang import language_directive
     return language_directive(code)
+
+
+def _build_live_system_prompt() -> str:
+    """Specialized system prompt for Gemini Live session."""
+    return """You are Clicky, a real-time visual AI tutor.
+You are connected via a live voice and vision stream.
+- You can see the user's screen in real-time.
+- You should provide concise, helpful spoken responses.
+- You can control the computer using tools like 'click' and 'type_text'.
+- Use 'click(x, y)' to interact with UI elements. Coordinates are in pixels.
+- Keep your turns short and conversational.
+"""
 
 
 def _guess_label(transcript: str) -> str:
@@ -220,6 +261,8 @@ class CompanionManager(QObject):
     sig_underline           = pyqtSignal(float, float, float)
     sig_label               = pyqtSignal(float, float, str)
     sig_recording_state     = pyqtSignal(bool, str)       # (is_recording, output_dir)
+    sig_live_mode_changed   = pyqtSignal(bool)            # Live mode toggled
+    sig_live_error          = pyqtSignal(str)             # Live session errors
 
     def __init__(self):
         super().__init__()
@@ -265,6 +308,11 @@ class CompanionManager(QObject):
         self._agent_mode = False          # toggled via set_agent_mode()
         self._workflow_runner = None      # lazy WorkflowRunner
 
+        # ── Gemini Live ───────────────────────────────────────────────────
+        self._live_mode = False
+        self._live_integration: Optional[GeminiLiveIntegration] = None
+        self._live_player = AsyncLiveAudioPlayer(sample_rate=24000)
+
         # Load user-created skills from skills/ + ~/.clicky/skills/
         try:
             skills_pkg.load_all()
@@ -275,6 +323,7 @@ class CompanionManager(QObject):
         self._listener = AmbientListener(
             on_level=self._handle_level,
             on_wake=self._handle_wake,
+            on_chunk=self._handle_live_mic_chunk
         )
 
         # Background asyncio loop
@@ -311,6 +360,9 @@ class CompanionManager(QObject):
             stop_audio()
         except Exception:
             pass
+        # Stop live session if active
+        if self._live_mode:
+            self.set_live_mode(False)
         self._listener.stop()
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -336,6 +388,315 @@ class CompanionManager(QObject):
         if self._workflow_runner and self._workflow_runner.is_running:
             self._workflow_runner.stop()
             print("[CompanionManager] Workflow stopped by user.", flush=True)
+
+    # ── Gemini Live ───────────────────────────────────────────────────
+
+    def set_live_mode(self, enabled: bool) -> None:
+        """Toggle Gemini Live mode. Bypasses STT→LLM→TTS pipeline."""
+        if enabled == self._live_mode:
+            return
+        self._live_mode = enabled
+        if enabled:
+            self._submit(self._start_live_session())
+        else:
+            self._submit(self._stop_live_session())
+        self.sig_live_mode_changed.emit(enabled)
+
+    @property
+    def live_mode(self) -> bool:
+        return self._live_mode
+
+    async def _start_live_session(self):
+        if self._live_integration:
+            return
+        
+        self._live_integration = GeminiLiveIntegration(
+            api_key=cfg.google_api_key,
+            on_audio_chunk=self._handle_live_audio,
+            on_text_chunk=self._handle_live_text,
+            on_tool_call=self._handle_live_tool,
+            on_error=self._handle_live_error
+        )
+        
+        system_prompt = _build_live_system_prompt()
+        
+        tools = [{
+            "function_declarations": [
+                {
+                    "name": "click",
+                    "description": "Click on a coordinate (x, y) on the screen.",
+                    "parameters": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "x": {"type": "NUMBER", "description": "X coordinate in pixels"},
+                            "y": {"type": "NUMBER", "description": "Y coordinate in pixels"}
+                        },
+                        "required": ["x", "y"]
+                    }
+                },
+                {
+                    "name": "type_text",
+                    "description": "Type a string of text.",
+                    "parameters": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "text": {"type": "STRING", "description": "The text to type"}
+                        },
+                        "required": ["text"]
+                    }
+                }
+            ]
+        }]
+        
+        await self._live_integration.start(system_instruction=system_prompt, tools=tools)
+        self._live_player.start()
+        self._emit_state(AppState.SPEAKING) # Visual feedback that it's "live"
+        print("[CompanionManager] Gemini Live session started.", flush=True)
+
+    async def _stop_live_session(self):
+        if self._live_integration:
+            await self._live_integration.stop()
+            self._live_integration = None
+        self._live_player.stop()
+        self._emit_state(AppState.IDLE)
+        print("[CompanionManager] Gemini Live session stopped.", flush=True)
+
+    def _handle_live_mic_chunk(self, pcm: bytes):
+        """Streams raw mic audio to Gemini if Live Mode is active."""
+        if self._live_mode and self._live_integration:
+            self._submit(self._live_integration.send_audio(pcm))
+
+    def _handle_live_audio(self, pcm: bytes):
+        """Queues audio chunks received from Gemini for playback."""
+        self._live_player.add_chunk(pcm)
+        if self._state != AppState.SPEAKING:
+            self._emit_state(AppState.SPEAKING)
+
+    def _handle_live_text(self, text: str):
+        """Displays text responses from Gemini Live in the panel."""
+        self.sig_response_chunk.emit(text)
+
+    def _handle_live_tool(self, name: str, args: dict):
+        """Handles tool calls from Gemini (e.g. computer control)."""
+        print(f"[GeminiLive] Tool call: {name}({args})")
+        # Integration with ActionExecutor
+        if self._agent_mode:
+            try:
+                from execution import action_executor
+                if name == "click":
+                    x, y = int(args.get("x", 0)), int(args.get("y", 0))
+                    self._loop.run_in_executor(None, action_executor.click, x, y)
+                elif name == "type_text":
+                    text = args.get("text", "")
+                    self._loop.run_in_executor(None, action_executor.type_text, text)
+            except Exception as e:
+                print(f"[GeminiLive] Tool execution error: {e}")
+
+    def _handle_live_error(self, err: str):
+        self.sig_error.emit(f"Gemini Live Error: {err}")
+        self.set_live_mode(False)
+
+    # ── Gemini Live Mode ────────────────────────────────────────────────────
+
+    def set_live_mode(self, enabled: bool) -> None:
+        """Toggle Gemini Live mode. Bypasses STT→LLM→TTS pipeline."""
+        if enabled and not self._live_mode:
+            self._submit(self._start_live_session())
+        elif not enabled and self._live_mode:
+            self._submit(self._stop_live_session())
+        self._live_mode = enabled
+        self.sig_live_mode_changed.emit(enabled)
+
+    @property
+    def live_mode(self) -> bool:
+        return self._live_mode
+
+    async def _start_live_session(self):
+        """Initialize Gemini Live session with audio player and screen capture."""
+        if not cfg.google_api_key:
+            self.sig_error.emit("Gemini API key not configured for Live Mode")
+            self._live_mode = False
+            return
+
+        try:
+            from ai.gemini_live_integration import GeminiLiveIntegration
+            from audio.playback import AsyncLiveAudioPlayer
+
+            self._live_audio_player = AsyncLiveAudioPlayer()
+            await self._live_audio_player.start()
+
+            self._gemini_live = GeminiLiveIntegration(
+                api_key=cfg.google_api_key,
+                on_audio_chunk=self._handle_live_audio,
+                on_text_chunk=self._handle_live_text,
+                on_tool_call=self._handle_live_tool_call,
+                on_error=self._handle_live_error,
+            )
+
+            system_prompt = _build_live_system_prompt()
+            await self._gemini_live.start(system_instruction=system_prompt)
+
+            # Store original on_chunk and redirect to live handler
+            self._original_on_chunk = self._listener._on_chunk
+            self._listener._on_chunk = self._handle_live_mic_chunk
+
+            # Start periodic screen capture
+            self._live_screen_task = asyncio.create_task(self._live_screen_loop())
+
+            self._emit_state(AppState.LISTENING)
+            print("[CompanionManager] Gemini Live session started.", flush=True)
+
+        except Exception as e:
+            err_msg = f"Failed to start Gemini Live: {e}"
+            print(f"[CompanionManager] {err_msg}", flush=True)
+            self.sig_error.emit(err_msg)
+            self._live_mode = False
+            await self._stop_live_session()
+
+    async def _stop_live_session(self):
+        """Tear down the live session and restore ambient listener."""
+        # Restore original on_chunk handler
+        if self._original_on_chunk is not None:
+            self._listener._on_chunk = self._original_on_chunk
+            self._original_on_chunk = None
+
+        # Clear audio buffer
+        self._live_audio_buffer.clear()
+
+        # Cancel screen capture loop
+        if self._live_screen_task:
+            self._live_screen_task.cancel()
+            try:
+                await self._live_screen_task
+            except asyncio.CancelledError:
+                pass
+            self._live_screen_task = None
+
+        # Stop Gemini Live session
+        if self._gemini_live:
+            try:
+                await self._gemini_live.stop()
+            except Exception:
+                pass
+            self._gemini_live = None
+
+        # Stop audio player
+        if self._live_audio_player:
+            try:
+                await self._live_audio_player.stop()
+            except Exception:
+                pass
+            self._live_audio_player = None
+
+        self._emit_state(AppState.IDLE)
+        print("[CompanionManager] Gemini Live session stopped.", flush=True)
+
+    def _handle_live_mic_chunk(self, pcm_bytes: bytes):
+        """Stream mic data directly to Gemini Live (bypasses STT)."""
+        if not self._live_mode or not self._gemini_live:
+            return
+
+        self._live_audio_buffer.extend(pcm_bytes)
+
+        # Stream in chunks (~200ms = 6400 bytes at 16kHz mono 16-bit)
+        chunk_size = 6400
+        while len(self._live_audio_buffer) >= chunk_size:
+            chunk = bytes(self._live_audio_buffer[:chunk_size])
+            del self._live_audio_buffer[:chunk_size]
+            self._submit(
+                self._gemini_live.send_audio(chunk, end_of_turn=False)
+            )
+
+    def _handle_live_audio(self, audio_bytes: bytes):
+        """Queue Gemini's audio response for playback."""
+        if self._live_audio_player:
+            self._live_audio_player.enqueue(audio_bytes)
+        if self._state != AppState.SPEAKING:
+            self._emit_state(AppState.SPEAKING)
+
+    def _handle_live_text(self, text: str):
+        """Display Gemini's text response in the panel."""
+        self.sig_response_chunk.emit(text)
+
+    def _handle_live_tool_call(self, name: str, args: dict):
+        """Map Gemini tool calls to ActionExecutor."""
+        if not self._agent_mode:
+            print(
+                f"[CompanionManager] Tool call '{name}' ignored — agent mode is OFF",
+                flush=True,
+            )
+            return
+
+        try:
+            from execution import action_executor
+
+            loop = asyncio.get_event_loop()
+
+            if name == "click":
+                x = int(args.get("x", 0))
+                y = int(args.get("y", 0))
+                button = args.get("button", "left")
+                clicks = int(args.get("clicks", 1))
+                loop.run_in_executor(
+                    None, action_executor.click, x, y, button, clicks
+                )
+
+            elif name == "type_text":
+                text = args.get("text", "")
+                loop.run_in_executor(None, action_executor.type_text, text)
+
+            elif name == "move_to":
+                x = int(args.get("x", 0))
+                y = int(args.get("y", 0))
+                duration = float(args.get("duration", 0.3))
+                loop.run_in_executor(None, action_executor.move_to, x, y, duration)
+
+            elif name == "scroll":
+                x = int(args.get("x", 0))
+                y = int(args.get("y", 0))
+                clicks = int(args.get("clicks", 3))
+                direction = args.get("direction", "down")
+                loop.run_in_executor(
+                    None, action_executor.scroll, x, y, clicks, direction
+                )
+
+            elif name == "press_key":
+                key = args.get("key", "")
+                loop.run_in_executor(None, action_executor.press_key, key)
+
+            elif name == "hotkey":
+                keys = args.get("keys", [])
+                loop.run_in_executor(None, action_executor.hotkey, *keys)
+
+            elif name == "open_app":
+                path_or_name = args.get("path_or_name", "")
+                loop.run_in_executor(None, action_executor.open_app, path_or_name)
+
+            else:
+                print(
+                    f"[CompanionManager] Unknown tool call: {name}",
+                    flush=True,
+                )
+
+        except Exception as e:
+            print(f"[CompanionManager] Tool execution error: {e}", flush=True)
+            self.sig_error.emit(f"Tool error: {e}")
+
+    def _handle_live_error(self, error: str):
+        """Handle errors from the Gemini Live session."""
+        print(f"[CompanionManager] Live error: {error}", flush=True)
+        self.sig_live_error.emit(error)
+
+    async def _live_screen_loop(self):
+        """Capture and send screenshots every 3 seconds for vision grounding."""
+        while self._live_mode:
+            try:
+                screenshots = capture_all_screens()
+                if screenshots and self._gemini_live:
+                    await self._gemini_live.send_screen(screenshots[0].base64_jpeg)
+            except Exception as e:
+                print(f"[CompanionManager] Live screen capture error: {e}", flush=True)
+            await asyncio.sleep(3)
 
 
 

@@ -61,9 +61,11 @@ class AmbientListener:
         self,
         on_level: Callable[[float], None],
         on_wake: Callable[[], None],
+        on_chunk: Optional[Callable[[bytes], None]] = None,
     ):
         self._on_level = on_level
         self._on_wake = on_wake
+        self._on_chunk = on_chunk
 
         self._mode: Mode = Mode.STANDBY
         self._stream: Optional[sd.InputStream] = None
@@ -155,6 +157,9 @@ class AmbientListener:
             self._first_chunk = False
 
         self._on_level(rms)
+
+        if self._on_chunk:
+            self._on_chunk(pcm_int16.tobytes())
 
         if self._mode == Mode.RECORDING:
             self._rec_buffer.append(pcm_int16.tobytes())

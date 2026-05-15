@@ -135,6 +135,10 @@ def main():
     tray.on_toggle_multilang.connect(manager.set_multilang)
     tray.on_toggle_journal.connect(manager.set_journal)
     tray.on_toggle_ocr.connect(manager.set_ocr_enabled)
+    tray.on_toggle_live_mode.connect(manager.set_live_mode)
+
+    # Live mode UI feedback
+    manager.sig_live_mode_changed.connect(panel.set_live_mode)
 
     # Lesson recording
     def _record_start():

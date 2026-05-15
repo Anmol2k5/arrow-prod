@@ -52,6 +52,7 @@ class TrayManager(QObject):
     on_run_setup          = pyqtSignal()
     on_diagnostics        = pyqtSignal()
     on_run_settings       = pyqtSignal()
+    on_toggle_live_mode   = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -79,6 +80,7 @@ class TrayManager(QObject):
         self._journal_enabled = True
         self._ocr_enabled = True
         self._is_recording = False
+        self._live_enabled = False
 
         # Ollama model state — populated by manager via set_ollama_models()
         self._ollama_installed: dict[str, list[str]] = {"vision": [], "text": []}
@@ -201,6 +203,16 @@ class TrayManager(QObject):
         ocr_action.setChecked(self._ocr_enabled)
         ocr_action.triggered.connect(self._toggle_ocr)
         self._ocr_action = ocr_action
+
+        # ── Gemini Live Mode ──
+        menu.addSeparator()
+        live_action = menu.addAction(
+            "Gemini Live Mode: ON" if self._live_enabled else "Gemini Live Mode: OFF"
+        )
+        live_action.setCheckable(True)
+        live_action.setChecked(self._live_enabled)
+        live_action.triggered.connect(self._toggle_live)
+        self._live_action = live_action
 
         # ── Journal ──
         menu.addSeparator()
@@ -406,6 +418,13 @@ class TrayManager(QObject):
             "Logging: ON" if checked else "Logging: OFF"
         )
         self.on_toggle_journal.emit(checked)
+
+    def _toggle_live(self, checked: bool):
+        self._live_enabled = checked
+        self._live_action.setText(
+            "Gemini Live Mode: ON" if checked else "Gemini Live Mode: OFF"
+        )
+        self.on_toggle_live_mode.emit(checked)
 
     def set_recording_state(self, on: bool):
         self._is_recording = on

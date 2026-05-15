@@ -134,6 +134,50 @@ class ProviderBadge(QLabel):
         self.setText(PROVIDER_LABELS.get(provider, provider))
 
 
+class LiveBadge(QLabel):
+    """Pulsing green indicator shown when Gemini Live mode is active."""
+
+    def __init__(self, parent=None):
+        super().__init__("LIVE", parent)
+        self.setVisible(False)
+        self.setStyleSheet(
+            "background: rgba(0,200,80,30); border: 1px solid rgba(0,200,80,120);"
+            "border-radius: 8px; color: rgb(0,220,100); font-size: 11px; "
+            "font-weight: bold; padding: 2px 8px;"
+        )
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.timeout.connect(self._pulse)
+        self._bright = True
+
+    def set_live(self, active: bool):
+        self.setVisible(active)
+        if active:
+            self._pulse_timer.start(800)
+        else:
+            self._pulse_timer.stop()
+            self._bright = True
+            self.setStyleSheet(
+                "background: rgba(0,200,80,30); border: 1px solid rgba(0,200,80,120);"
+                "border-radius: 8px; color: rgb(0,220,100); font-size: 11px; "
+                "font-weight: bold; padding: 2px 8px;"
+            )
+
+    def _pulse(self):
+        self._bright = not self._bright
+        if self._bright:
+            self.setStyleSheet(
+                "background: rgba(0,200,80,30); border: 1px solid rgba(0,200,80,120);"
+                "border-radius: 8px; color: rgb(0,220,100); font-size: 11px; "
+                "font-weight: bold; padding: 2px 8px;"
+            )
+        else:
+            self.setStyleSheet(
+                "background: rgba(0,200,80,15); border: 1px solid rgba(0,200,80,60);"
+                "border-radius: 8px; color: rgb(0,180,80); font-size: 11px; "
+                "font-weight: bold; padding: 2px 8px;"
+            )
+
+
 class CompanionPanel(QWidget):
     """Floating companion control panel — equivalent to CompanionPanelView.swift."""
 
@@ -195,6 +239,8 @@ class CompanionPanel(QWidget):
         provider = cfg.llm_provider()
         self._badge = ProviderBadge(provider)
         header.addWidget(self._badge)
+        self._live_badge = LiveBadge()
+        header.addWidget(self._live_badge)
 
         # Settings button — opens API key dialog
         self._set_btn = QPushButton("⚙")
@@ -325,6 +371,10 @@ class CompanionPanel(QWidget):
         """Called from outside when the active provider is switched at runtime."""
         self._badge.set_provider(provider)
         self._set_models_for(provider)
+
+    def set_live_mode(self, active: bool):
+        """Show/hide the LIVE badge when Gemini Live mode is toggled."""
+        self._live_badge.set_live(active)
 
     def _position_bottom_right(self):
         from PyQt6.QtWidgets import QApplication

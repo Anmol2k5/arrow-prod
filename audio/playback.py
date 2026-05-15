@@ -116,3 +116,101 @@ async def play_mp3_async(mp3_bytes: bytes) -> None:
         return  # cancelled while we were decoding
 
     await loop.run_in_executor(None, _blocking_play_chunked, pcm, sr)
+
+
+class AsyncLiveAudioPlayer:
+    """Streams 24kHz PCM16 chunks from Gemini Live smoothly without blocking.
+
+    Maintains an internal queue so audio chunks can be enqueued from the
+    WebSocket receive thread and played back asynchronously.
+    """
+
+    def __init__(self, sample_rate: int = 24000):
+        self._sample_rate = sample_rate
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._stream: Optional[sd.OutputStream] = None
+        self._play_task: Optional[asyncio.Task] = None
+        self._stop_event = threading.Event()
+        self._is_running = False
+
+    async def start(self):
+        """Open the audio output stream and start the playback loop."""
+        if self._is_running:
+            return
+
+        self._stop_event.clear()
+        self._is_running = True
+
+        try:
+            self._stream = sd.OutputStream(
+                samplerate=self._sample_rate,
+                channels=1,
+                dtype="int16",
+                blocksize=4800,  # 200ms buffer at 24kHz
+            )
+            self._stream.start()
+        except Exception as e:
+            self._is_running = False
+            raise RuntimeError(f"Failed to open audio output stream: {e}")
+
+        self._play_task = asyncio.create_task(self._playback_loop())
+
+    async def enqueue(self, pcm_bytes: bytes):
+        """Queue a PCM16 chunk for playback."""
+        if not self._is_running:
+            return
+        await self._queue.put(pcm_bytes)
+
+    async def _playback_loop(self):
+        """Continuously drain the queue to the audio stream."""
+        while not self._stop_event.is_set():
+            try:
+                chunk = await asyncio.wait_for(
+                    self._queue.get(), timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                continue
+
+            if self._stop_event.is_set():
+                break
+
+            if self._stream:
+                try:
+                    audio_data = np.frombuffer(chunk, dtype=np.int16)
+                    self._stream.write(audio_data)
+                except Exception as e:
+                    print(f"[AsyncLiveAudioPlayer] Playback error: {e}")
+
+    async def stop(self):
+        """Stop playback and close the stream."""
+        self._stop_event.set()
+
+        if self._play_task:
+            try:
+                self._play_task.cancel()
+                await self._play_task
+            except asyncio.CancelledError:
+                pass
+            self._play_task = None
+
+        if self._stream:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+
+        self._is_running = False
+
+    def clear(self):
+        """Drain the queue immediately (for interruption)."""
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+    @property
+    def is_running(self) -> bool:
+        return self._is_running
