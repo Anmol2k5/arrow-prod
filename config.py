@@ -22,7 +22,8 @@ class Config:
     groq_api_key: Optional[str] = field(default_factory=lambda: os.getenv("GROQ_API_KEY") or None)
     deepseek_api_key: Optional[str] = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY") or None)
     openrouter_api_key: Optional[str] = field(default_factory=lambda: os.getenv("OPENROUTER_API_KEY") or None)
-    nvidia_api_key: Optional[str] = field(default_factory=lambda: os.getenv("NVIDIA_API_KEY") or None)
+    nvidia_api_key: Optional[str] = field(default_factory=lambda: os.getenv("NVIDIA_API_KEY") or os.getenv("NVDIA_API_KEY") or None)
+    nvidia_model: str = field(default_factory=lambda: os.getenv("NVIDIA_MODEL", "meta/llama-3.2-90b-vision-instruct"))
     ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://localhost:11434"))
     # Legacy single-model knob — still respected as a fallback for both slots
     # below. New users should prefer OLLAMA_VISION_MODEL / OLLAMA_TEXT_MODEL.
@@ -40,6 +41,7 @@ class Config:
     # TTS
     elevenlabs_api_key: Optional[str] = field(default_factory=lambda: os.getenv("ELEVENLABS_API_KEY") or None)
     elevenlabs_voice_id: str = field(default_factory=lambda: os.getenv("ELEVENLABS_VOICE_ID", ""))
+    sarvam_ai_api_key: Optional[str] = field(default_factory=lambda: os.getenv("SARVAM_AI_API") or os.getenv("SARVAM_AI_API_KEY") or None)
 
     # Search
     tavily_api_key: Optional[str] = field(default_factory=lambda: os.getenv("TAVILY_API_KEY") or None)
@@ -119,12 +121,14 @@ class Config:
         # Prefer whisper.cpp (GPU-accelerated, same engine as Handy) when the
         # pywhispercpp package is installed; otherwise fall back to faster-whisper.
         try:
-            import pywhispercpp  # noqa: F401
+            import pywhispercpp  # type: ignore
             return "whisper_cpp"
-        except ImportError:
+        except (ImportError, ModuleNotFoundError):
             return "faster_whisper"
 
     def tts_provider(self) -> str:
+        if self.sarvam_ai_api_key:
+            return "sarvam"
         if self.elevenlabs_api_key:
             return "elevenlabs"
         if self.openai_api_key:

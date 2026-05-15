@@ -46,9 +46,14 @@ _FALLBACKS: dict[str, list[dict]] = {
         {"id": "gpt-4-turbo",   "label": "GPT-4 Turbo",  "vision": True},
     ],
     "gemini": [
-        {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash", "vision": True},
-        {"id": "gemini-2.5-pro",   "label": "Gemini 2.5 Pro",   "vision": True},
+        {"id": "gemini-1.5-pro",   "label": "Gemini 1.5 Pro",   "vision": True},
+        {"id": "gemini-1.5-flash", "label": "Gemini 1.5 Flash", "vision": True},
         {"id": "gemini-2.0-flash", "label": "Gemini 2.0 Flash", "vision": True},
+    ],
+    "nvidia": [
+        {"id": "meta/llama-3.2-90b-vision-instruct", "label": "Llama 3.2 90B Vision", "vision": True},
+        {"id": "meta/llama-3.1-405b-instruct",       "label": "Llama 3.1 405B",        "vision": False},
+        {"id": "nvidia/nemotron-4-340b-instruct",    "label": "Nemotron-4 340B",       "vision": False},
     ],
 }
 
@@ -167,10 +172,39 @@ async def _fetch_gemini() -> list[dict]:
     return out
 
 
+async def _fetch_nvidia() -> list[dict]:
+    if not cfg.nvidia_api_key:
+        return []
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            "https://integrate.api.nvidia.com/v1/models",
+            headers={"Authorization": f"Bearer {cfg.nvidia_api_key}"},
+        )
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    out = []
+    # NVIDIA returns many models; filter for those likely to be chat/vision
+    vision_ids = ("vision", "vl", "clip", "siglip")
+    for m in data:
+        mid = m.get("id")
+        if not mid:
+            continue
+        out.append({
+            "id": mid,
+            "label": mid,
+            "vision": any(v in mid.lower() for v in vision_ids),
+        })
+    return out
+
+
+    return out
+
+
 _FETCHERS = {
-    "claude":  _fetch_claude,
-    "openai":  _fetch_openai,
-    "gemini":  _fetch_gemini,
+    "claude":     _fetch_claude,
+    "openai":     _fetch_openai,
+    "gemini":     _fetch_gemini,
+    "nvidia":     _fetch_nvidia,
 }
 
 

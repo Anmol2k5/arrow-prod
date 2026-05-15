@@ -28,7 +28,7 @@ from tutor import (
 )
 from tutor_features import (
     journal, pdf_context, ocr, code_mode, lesson_recorder,
-    multilang, workflow_capture, collab,
+    multilang, workflow_capture, collab, memory,
 )
 import skills as skills_pkg
 
@@ -41,6 +41,7 @@ def _build_system_prompt(
     detected_coord: Optional[tuple] = None,
     code_active: bool = False,
     language_code: str = "en",
+    memory_text: str = "",
     extra: str = "",
 ) -> str:
     today = datetime.now().strftime("%A, %B %d, %Y")
@@ -133,7 +134,7 @@ HARD RULES (never break):
      Use sparingly — at most 2 annotations per response.
 
 STYLE: warm, concise, teacher-y. 1-2 sentences per step. No markdown bullets
-unless genuinely listing options.{_code_addendum(code_active)}{_lang_addendum(language_code)}{extra}"""
+unless genuinely listing options.{_code_addendum(code_active)}{_lang_addendum(language_code)}{memory.format_for_prompt(memory_text)}{memory.instructions()}{extra}"""
 
 
 def _code_addendum(active: bool) -> str:
@@ -184,8 +185,9 @@ ARROW_RE     = re.compile(r'\[ARROW:(\d+),(\d+)->(\d+),(\d+)\]')
 CIRCLE_RE    = re.compile(r'\[CIRCLE:(\d+),(\d+),(\d+):([^\]]+)\]')
 UNDERLINE_RE = re.compile(r'\[UNDERLINE:(\d+),(\d+),(\d+)\]')
 LABEL_RE     = re.compile(r'\[LABEL:(\d+),(\d+):([^\]]+)\]')
+MEMORY_RE     = re.compile(r'\[MEMORY:(.*?)\]', re.DOTALL)
 ANY_TAG_RE   = re.compile(
-    r'\[(?:POINT|ARROW|CIRCLE|UNDERLINE|LABEL):[^\]]*\]'
+    r'\[(?:POINT|ARROW|CIRCLE|UNDERLINE|LABEL|MEMORY):[^\]]*\]'
 )
 ANY_PARTIAL_RE = re.compile(r'\[[A-Z]{0,9}(?::[^\]]*)?$')
 
@@ -257,6 +259,12 @@ class CompanionManager(QObject):
         self._collab: Optional[collab.CollabSession] = None
         self._workflow: Optional[workflow_capture.WorkflowCapture] = None
 
+        # ── Agent mode (Phase 1) ───────────────────────────────────────────
+        # Last detected element coordinate — shared with autopilot_skill.py
+        self._last_detected_coord: Optional[tuple[int, int, str]] = None
+        self._agent_mode = False          # toggled via set_agent_mode()
+        self._workflow_runner = None      # lazy WorkflowRunner
+
         # Load user-created skills from skills/ + ~/.clicky/skills/
         try:
             skills_pkg.load_all()
@@ -306,6 +314,30 @@ class CompanionManager(QObject):
         self._listener.stop()
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
+
+    # ── Agent mode ────────────────────────────────────────────────────────────
+
+    def set_agent_mode(self, enabled: bool) -> None:
+        """
+        Enable / disable Agent Mode (autopilot execution).
+        When enabled, the LLM is allowed to emit [WORKFLOW:{...}] plans
+        that Arrow will execute automatically, and the 'click that' voice
+        skill becomes active.
+        """
+        self._agent_mode = enabled
+        print(f"[CompanionManager] Agent mode {'ON' if enabled else 'OFF'}", flush=True)
+
+    @property
+    def agent_mode(self) -> bool:
+        return self._agent_mode
+
+    def stop_workflow(self) -> None:
+        """Emergency-stop a running workflow plan (e.g. from Esc key)."""
+        if self._workflow_runner and self._workflow_runner.is_running:
+            self._workflow_runner.stop()
+            print("[CompanionManager] Workflow stopped by user.", flush=True)
+
+
 
     def _run_loop(self):
         self._loop = asyncio.new_event_loop()
@@ -418,7 +450,10 @@ class CompanionManager(QObject):
     def _get_tts(self):
         if self._tts is None:
             provider = cfg.tts_provider()
-            if provider == "elevenlabs":
+            if provider == "sarvam":
+                from audio.tts.sarvam_provider import SarvamProvider
+                self._tts = SarvamProvider()
+            elif provider == "elevenlabs":
                 from audio.tts.elevenlabs_provider import ElevenLabsProvider
                 self._tts = ElevenLabsProvider()
             elif provider == "openai":
@@ -434,10 +469,12 @@ class CompanionManager(QObject):
     def on_hotkey_press(self):
         if self._state != AppState.IDLE:
             return
+        print("[CompanionManager] Hotkey pressed — starting capture...", flush=True)
         self._begin_capture()
 
     def on_hotkey_release(self):
         if self._state == AppState.LISTENING:
+            print("[CompanionManager] Hotkey released — processing audio...", flush=True)
             self._submit(self._end_capture_and_process())
 
     def _handle_wake(self):
@@ -482,6 +519,7 @@ class CompanionManager(QObject):
         try:
             # 1. Transcribe
             transcript = await self._get_stt().transcribe(pcm)
+            print(f"[CompanionManager] Transcribed: '{transcript}'", flush=True)
             if not transcript.strip():
                 self._emit_state(AppState.IDLE)
                 return
@@ -628,6 +666,8 @@ class CompanionManager(QObject):
                 # Short label guess — first noun phrase after "the"/"where"
                 label = _guess_label(transcript)
                 detected_coord = (int(detected.x), int(detected.y), label)
+                # Persist for autopilot skill ("click that") to reuse
+                self._last_detected_coord = detected_coord
                 # Fire the overlay NOW so the buddy flies over while the LLM
                 # still thinks. Hold dwell until TTS completes.
                 self.sig_point_hold.emit(True)
@@ -635,8 +675,11 @@ class CompanionManager(QObject):
                 self.sig_point_at.emit(
                     float(detected.x), float(detected.y), label,
                 )
+            elif locate_triggered:
+                print("[CompanionManager] Pointing engine could not find a specific element to point at.", flush=True)
 
-            # ── Per-turn enrichment: code mode, language, OCR, attached docs ──
+            # ── Per-turn enrichment: memory, code mode, language, OCR, attached docs ──
+            mem_txt = memory.load_memory()
             code_active = self._code_mode_auto and code_mode.is_code_window(title)
             lang_code = (multilang.detect_language(transcript)
                          if self._multilang else "en")
@@ -667,6 +710,7 @@ class CompanionManager(QObject):
                 detected_coord=detected_coord,
                 code_active=code_active,
                 language_code=lang_code,
+                memory_text=mem_txt,
                 extra=ocr_extra + doc_extra,
             )
             if sensitive:
@@ -684,6 +728,7 @@ class CompanionManager(QObject):
             history = self._app_memory.setdefault(ak, [])
 
             # 5. Stream LLM — buffer partial [POINT:...] tags so they never leak
+            print(f"[CompanionManager] Requesting response from {cfg.llm_provider()}...", flush=True)
             full_response = ""
             display_buf = ""
             self._cancel_flag = False
@@ -709,6 +754,10 @@ class CompanionManager(QObject):
                     display_buf = ""
                 if flush:
                     self.sig_response_chunk.emit(flush)
+            
+            # Save any memory updates
+            self._parse_memory(full_response)
+
             if display_buf:
                 self.sig_response_chunk.emit(ANY_TAG_RE.sub("", display_buf))
 
@@ -725,8 +774,28 @@ class CompanionManager(QObject):
                     self._lesson_step_idx = 0
 
             clean = ANY_TAG_RE.sub("", full_response).strip()
+            # Also strip any [WORKFLOW:...] tags from the display text
+            clean = re.sub(r'\[WORKFLOW:\{.*?\}\]', '', clean, flags=re.DOTALL).strip()
             self.sig_response_done.emit(clean)
             self._last_response = clean   # for "say it again"
+
+            # ── Agent mode: execute workflow plan if LLM emitted one ─────────
+            if self._agent_mode:
+                try:
+                    from execution.workflow_runner import WorkflowRunner, parse_workflow
+                    steps = parse_workflow(full_response)
+                    if steps:
+                        if self._workflow_runner is None:
+                            self._workflow_runner = WorkflowRunner(self)
+                        # Run the plan concurrently with TTS so Arrow narrates
+                        # while it works (fire and don't await here — TTS takes
+                        # priority; plan starts after a short pause).
+                        async def _run_plan_after_delay(s):
+                            await asyncio.sleep(1.0)
+                            await self._workflow_runner.run(s)
+                        self._submit(_run_plan_after_delay(steps))
+                except Exception as _wf_err:
+                    print(f"[CompanionManager] workflow parse error: {_wf_err}", flush=True)
 
             # Log to knowledge journal (skipped in quiz mode — those Q&As aren't
             # study material)
@@ -849,6 +918,14 @@ class CompanionManager(QObject):
         for match in LABEL_RE.finditer(text):
             x, y, txt = match.groups()
             self.sig_label.emit(float(x), float(y), txt.strip())
+
+    def _parse_memory(self, text: str):
+        # We take the LAST [MEMORY:...] tag in the response as the definitive new state
+        matches = list(MEMORY_RE.finditer(text))
+        if matches:
+            new_mem = matches[-1].group(1).strip()
+            if new_mem:
+                memory.save_memory(new_mem)
 
     def _emit_state(self, state: AppState):
         self._state = state

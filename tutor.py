@@ -45,9 +45,10 @@ def app_key(title: str) -> str:
 # ── Locate-query classification ──────────────────────────────────────────────
 
 LOCATE_RE = re.compile(
-    r"\b(where\s+(is|do|can|should)|how\s+do\s+i\s+(click|find|open|access|use|get\s+to)|"
-    r"point\s+(at|to)|show\s+me\s+(the|where)|click\s+(the|on)|find\s+the|"
-    r"locate\s+the|highlight\s+the)\b",
+    r"\b(where\s+(is|do|can|should|are)|how\s+do\s+i\s+(click|find|open|access|use|get\s+to|do)|"
+    r"point\s+(at|to|towards)|show\s+me\s+(the|where|how)|click\s+(the|on|at)|find\s+the|"
+    r"locate\s+the|highlight\s+the|help\s+me\s+(to\s+)?(find|click|locate|subscribe|open|use|access|buy|login)|"
+    r"how\s+(to|do\s+i)\s+(subscribe|follow|like|comment|buy|login|sign\s*up))\b",
     re.IGNORECASE,
 )
 

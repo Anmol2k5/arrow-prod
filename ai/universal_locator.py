@@ -214,6 +214,7 @@ async def _ask_grid_pick(
 
     reply = "".join(chunks)
     n = _parse_cell_number(reply, max_n)
+    print(f"[UniversalLocator] Model reply: '{reply.strip()}' -> Pick: {n}", flush=True)
     if n == 0:
         return None
     return n
@@ -251,11 +252,15 @@ async def detect_element_universal(
     if physical_height is None:
         physical_height = original_height
 
-    # Scale factor: from infer-image px → original JPEG px → physical px
-    scale_w = MAX_INFERENCE_WIDTH / fw if fw > MAX_INFERENCE_WIDTH else 1.0
-    iw = int(fw * scale_w)
-    ih = int(fh * scale_w)
-    infer_img = full_img.resize((iw, ih), Image.Resampling.LANCZOS) if scale_w != 1.0 else full_img
+    # Downscale to inference size if needed.
+    # Keep track of actual infer dimensions — used later for back-projection.
+    if fw > MAX_INFERENCE_WIDTH:
+        iw = MAX_INFERENCE_WIDTH
+        ih = int(fh * MAX_INFERENCE_WIDTH / fw)
+        infer_img = full_img.resize((iw, ih), Image.Resampling.LANCZOS)
+    else:
+        iw, ih = fw, fh
+        infer_img = full_img
 
     # ── Stage 1 ─────────────────────────────────────────────────────────
     s1_img = _draw_grid(infer_img, STAGE1_COLS, STAGE1_ROWS)
@@ -287,15 +292,19 @@ async def detect_element_universal(
     crop = infer_img.crop((crop_left, crop_top, crop_right, crop_bottom))
 
     # ── Stage 2 ─────────────────────────────────────────────────────────
-    # Optionally upscale the crop a bit so the grid labels are crisp at
-    # vision-LLM resolution (helps llava in particular)
+    # Optionally upscale the crop so the grid labels are crisp for the LLM.
+    # IMPORTANT: track the upscaled crop size — Stage-2 cell math MUST use
+    # the dimensions of the image that was actually sent to the LLM, not the
+    # original pre-upscale crop extents.
     target_crop_w = max(crop.size[0], 768)
     if crop.size[0] < target_crop_w:
-        scale = target_crop_w / crop.size[0]
+        crop_scale = target_crop_w / crop.size[0]
         crop = crop.resize(
-            (target_crop_w, int(crop.size[1] * scale)),
+            (target_crop_w, int(crop.size[1] * crop_scale)),
             Image.Resampling.LANCZOS,
         )
+    # Actual pixel size of the crop sent to Stage-2 LLM call
+    s2_img_w, s2_img_h = crop.size
 
     s2_img = _draw_grid(crop, STAGE2_COLS, STAGE2_ROWS)
     s2_b64 = _img_to_jpeg_b64(s2_img, quality=85)
@@ -307,23 +316,32 @@ async def detect_element_universal(
         infer_x = (s1_col + 0.5) * cell_w
         infer_y = (s1_row + 0.5) * cell_h
     else:
-        # s2 cell centre in CROP space
+        # s2 cell centre in UPSCALED-crop space → map back to infer-image space.
+        # Cell dimensions refer to the image the LLM actually saw (s2_img_w/h).
         s2_idx = s2_pick - 1
         s2_row = s2_idx // STAGE2_COLS
         s2_col = s2_idx % STAGE2_COLS
-        s2_cell_w = (crop_right - crop_left) / STAGE2_COLS
-        s2_cell_h = (crop_bottom - crop_top) / STAGE2_ROWS
-        infer_x = crop_left + (s2_col + 0.5) * s2_cell_w
-        infer_y = crop_top  + (s2_row + 0.5) * s2_cell_h
+        s2_cell_w = s2_img_w / STAGE2_COLS
+        s2_cell_h = s2_img_h / STAGE2_ROWS
+        # Sub-cell centre in upscaled-crop px
+        sc_x = (s2_col + 0.5) * s2_cell_w
+        sc_y = (s2_row + 0.5) * s2_cell_h
+        # Scale back to infer-image px (crop may have been upscaled)
+        crop_px_w = crop_right - crop_left   # pre-upscale crop width in infer px
+        crop_px_h = crop_bottom - crop_top
+        sc_x_infer = sc_x * crop_px_w / s2_img_w
+        sc_y_infer = sc_y * crop_px_h / s2_img_h
+        infer_x = crop_left + sc_x_infer
+        infer_y = crop_top  + sc_y_infer
 
     # ── Coord transform: infer-img → physical px → logical Qt px ───────
-    # infer_img → original JPEG (× 1/scale_w), then JPEG → physical px
-    # (already accounted for in physical_width/original_width).
-    jpeg_x = infer_x / scale_w
-    jpeg_y = infer_y / scale_w
+    # infer_x/y are in infer-image pixels (iw × ih).
+    # Map → original JPEG fraction → physical monitor pixels → logical px.
+    frac_x = infer_x / iw
+    frac_y = infer_y / ih
 
-    px = jpeg_x / original_width  * physical_width
-    py = jpeg_y / original_height * physical_height
+    px = frac_x * physical_width
+    py = frac_y * physical_height
 
     vx = px + physical_left
     vy = py + physical_top
@@ -331,5 +349,13 @@ async def detect_element_universal(
     s = dpi_scale if dpi_scale > 0 else 1.0
     lx = int(round(vx / s))
     ly = int(round(vy / s))
+
+    print(
+        f"[UniversalLocator] s1={s1_pick} s2={s2_pick} "
+        f"infer=({infer_x:.1f},{infer_y:.1f}) "
+        f"frac=({frac_x:.3f},{frac_y:.3f}) "
+        f"phys=({px:.0f},{py:.0f}) logical=({lx},{ly}) dpi={s}",
+        flush=True,
+    )
 
     return Detected(x=lx, y=ly, screen_index=screen_index)

@@ -92,9 +92,6 @@ PROVIDER_LABELS = {
     "gemini":  "Gemini",
     "copilot": "Copilot",
     "ollama":  f"Ollama ({cfg.ollama_model})",
-    "groq": "Groq",
-    "deepseek": "DeepSeek",
-    "openrouter": "OpenRouter",
     "nvidia": "NVIDIA",
 }
 
@@ -144,6 +141,7 @@ class CompanionPanel(QWidget):
     on_push_to_talk_released = pyqtSignal()
     on_model_changed         = pyqtSignal(str)
     on_document_dropped      = pyqtSignal(str)
+    on_run_settings          = pyqtSignal()
     _sig_copilot_code        = pyqtSignal(str, str)   # (user_code, verification_uri)
     _sig_copilot_error       = pyqtSignal(str)
 
@@ -197,6 +195,18 @@ class CompanionPanel(QWidget):
         provider = cfg.llm_provider()
         self._badge = ProviderBadge(provider)
         header.addWidget(self._badge)
+
+        # Settings button — opens API key dialog
+        self._set_btn = QPushButton("⚙")
+        self._set_btn.setFixedSize(24, 24)
+        self._set_btn.setStyleSheet(
+            "QPushButton { background: rgba(60,60,75,180); color: rgb(220,220,230);"
+            "border: none; border-radius: 12px; font-size: 14px; }"
+            "QPushButton:hover { background: rgba(80,80,95,220); color: #fff; }"
+        )
+        self._set_btn.setToolTip("API Keys / Settings")
+        self._set_btn.clicked.connect(self.on_run_settings.emit)
+        header.addWidget(self._set_btn)
 
         # Minimize button — hides the panel back to tray
         self._min_btn = QPushButton("—")
@@ -286,24 +296,23 @@ class CompanionPanel(QWidget):
         if provider == "copilot":
             for mid, label in _copilot_model_choices():
                 self._model_combo.addItem(label, userData=mid)
-        elif provider in ("claude", "openai", "gemini"):
+        elif provider in ("claude", "openai", "gemini", "nvidia"):
             try:
-                from ai.model_registry import cached_models
-                for m in cached_models(provider):
-                    label = m["id"]
+                from ai.model_registry import cached_models, best_default
+                models = cached_models(provider)
+                for m in models:
+                    label = m["label"]
                     if not m.get("vision"):
                         label += "  (no vision)"
                     self._model_combo.addItem(label, userData=m["id"])
+                
+                # Auto-select best model (or current cfg model if it exists)
+                best = best_default(provider)
+                idx = self._model_combo.findData(best)
+                if idx >= 0:
+                    self._model_combo.setCurrentIndex(idx)
             except Exception:
                 self._model_combo.addItem("default", userData="default")
-        elif provider == "groq":
-            self._model_combo.addItem("llama-3.2-11b-vision-preview", userData="llama-3.2-11b-vision-preview")
-        elif provider == "deepseek":
-            self._model_combo.addItem("deepseek-chat", userData="deepseek-chat")
-        elif provider == "openrouter":
-            self._model_combo.addItem("anthropic/claude-3-5-sonnet-20241022", userData="anthropic/claude-3-5-sonnet-20241022")
-        elif provider == "nvidia":
-            self._model_combo.addItem("meta/llama-3.1-405b-instruct", userData="meta/llama-3.1-405b-instruct")
         else:   # ollama
             self._model_combo.addItem(cfg.ollama_model, userData=cfg.ollama_model)
         self._model_combo.blockSignals(False)

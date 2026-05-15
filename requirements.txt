@@ -59,5 +59,13 @@ imageio-ffmpeg>=0.5.0
 # Workflow capture (record clicks + keystrokes)
 pynput>=1.7.7
 
+# ── Agent mode (Arrow autopilot) ─────────────────────────────────────────────
+# Phase 1: click/type execution
+pyautogui>=0.9.54
+
+# Phase 2: Windows Accessibility tree (Tier 1 element resolver)
+# Uncomment when ready for Phase 2:
+# uiautomation>=2.0.18
+
 # Live collaboration (WebRTC) — install when collab signalling server exists
 # aiortc>=1.9.0

@@ -25,7 +25,7 @@ class NvidiaProvider(BaseLLMProvider):
         system_prompt: str,
         model: str | None = None,
     ) -> AsyncIterator[str]:
-        model = model or DEFAULT_MODEL
+        model = model or cfg.nvidia_model
 
         messages = [{"role": "system", "content": system_prompt}]
 

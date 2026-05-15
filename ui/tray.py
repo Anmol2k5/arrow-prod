@@ -51,6 +51,7 @@ class TrayManager(QObject):
     on_attach_doc         = pyqtSignal()
     on_run_setup          = pyqtSignal()
     on_diagnostics        = pyqtSignal()
+    on_run_settings       = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -248,6 +249,8 @@ class TrayManager(QObject):
         setup_menu = menu.addMenu("Setup && Diagnostics")
         run_setup = setup_menu.addAction("Run setup wizard again…")
         run_setup.triggered.connect(self.on_run_setup)
+        api_keys = setup_menu.addAction("API Keys / Settings…")
+        api_keys.triggered.connect(self.on_run_settings)
         diag = setup_menu.addAction("Save diagnostics report…")
         diag.triggered.connect(self.on_diagnostics)
 

@@ -3,7 +3,8 @@ Always-on ambient audio listener.
 Handles:
   - Continuous mic stream (single sounddevice input)
   - Energy-based VAD to detect speech segments
-  - Wake-word detection via faster-whisper tiny model (triggers on "clicky" / "hey clicky")
+  - Wake-word detection via faster-whisper tiny model
+    (triggers on "arrow" / "hey arrow" OR legacy "clicky" / "hey clicky")
   - Push-to-talk buffering when hotkey is held
   - Streams RMS level to UI (cursor waveform + panel)
 """
@@ -14,7 +15,7 @@ from enum import Enum, auto
 from typing import Callable, Optional
 
 import numpy as np
-import sounddevice as sd
+import sounddevice as sd  # type: ignore
 
 from audio.capture import pcm16_to_wav, SAMPLE_RATE
 
@@ -27,14 +28,20 @@ class Mode(Enum):
 # ── Tuning knobs ──────────────────────────────────────────────────────────────
 BLOCK_MS           = 30              # mic callback granularity
 FRAMES_PER_BLOCK   = int(SAMPLE_RATE * BLOCK_MS / 1000)
-ENERGY_THRESHOLD   = 0.006           # lower = catches quieter speech
-MIN_SPEECH_BLOCKS  = 3               # ~90ms of speech to start a segment
-SILENCE_BLOCKS_END = 20              # ~600ms of silence ends a segment
-MAX_SEGMENT_BLOCKS = 120             # ~3.6s max wake-word segment
-PRE_ROLL_BLOCKS    = 18              # ~540ms of pre-roll for the wake word
+ENERGY_THRESHOLD   = 0.001           # lower = catches quieter speech
+MIN_SPEECH_BLOCKS  = 2               # ~60ms of speech to start a segment
+SILENCE_BLOCKS_END = 30              # ~900ms of silence ends a segment
+MAX_SEGMENT_BLOCKS = 200             # ~6s max wake-word segment
+PRE_ROLL_BLOCKS    = 25              # ~750ms of pre-roll
 
-# Wake phrases — whisper tiny often mis-transcribes "clicky" so we cover variants
+# Primary wake phrases — "Arrow" (new project name)
+# Whisper tiny often mis-transcribes short words so we cover phonetic variants.
 WAKE_WORDS = (
+    # ── Arrow (primary) ──────────────────────────────────────────────────
+    "arrow", "erro", "ero", "aero", "harrow", "narrow",
+    "hey arrow", "hi arrow", "ok arrow", "yo arrow", "hey aero",
+    "hey aro", "hey erro", "hey harrow",
+    # ── Clicky (legacy fallback — keep working for existing users) ───────
     "clicky", "click e", "click he", "click me", "clickie", "clicki",
     "cliki", "klicki", "klicky", "kilicky", "clickey", "clickity",
     "hey clicky", "hi clicky", "hey click", "ok clicky", "yo clicky",
@@ -87,6 +94,12 @@ class AmbientListener:
         if self._running:
             return
         self._running = True
+        try:
+            device_info = sd.query_devices(None, 'input')
+            print(f"[AmbientListener] Starting stream on device: {device_info['name']} (index: {device_info['index']})")
+        except Exception as e:
+            print(f"[AmbientListener] Error querying device: {e}")
+
         self._stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
@@ -95,6 +108,8 @@ class AmbientListener:
             callback=self._callback,
         )
         self._stream.start()
+        print("[AmbientListener] Stream started.")
+        self._first_chunk = True
 
     def stop(self):
         self._running = False
@@ -135,6 +150,10 @@ class AmbientListener:
         pcm_int16 = indata[:, 0] if indata.ndim == 2 else indata
         pcm_float = pcm_int16.astype(np.float32) / 32768.0
         rms = float(np.sqrt(np.mean(pcm_float ** 2)))
+        if self._first_chunk:
+            print(f"[AmbientListener] Received first chunk. RMS: {rms:.4f}")
+            self._first_chunk = False
+
         self._on_level(rms)
 
         if self._mode == Mode.RECORDING:
@@ -227,7 +246,7 @@ class AmbientListener:
                 condition_on_previous_text=False,
                 no_speech_threshold=0.45,
                 temperature=0.0,
-                initial_prompt="Clicky is a helpful AI assistant.",
+                initial_prompt="Arrow is a helpful AI assistant. Hey Arrow.",
             )
             return " ".join(s.text for s in segments)
         finally:

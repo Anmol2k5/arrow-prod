@@ -259,6 +259,8 @@ class SetupWizard(QDialog):
     def _on_skip(self):
         s = self._step
         if s == "intro":
+            from ui.settings_dialog import show_settings
+            show_settings(self)
             mark_setup_complete()
             self.reject()
         elif s == "text_model":

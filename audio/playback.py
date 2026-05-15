@@ -30,6 +30,11 @@ def stop_audio() -> None:
         pass
 
 
+def is_audio_stopped() -> bool:
+    """Returns True if the global stop event is currently set."""
+    return _stop_event.is_set()
+
+
 def _arm_audio() -> None:
     """Reset the stop flag at the start of a new playback."""
     _stop_event.clear()

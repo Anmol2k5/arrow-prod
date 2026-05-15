@@ -61,6 +61,8 @@ def _copilot_login_flow(tray, panel, manager):
 
 
 def main():
+    print("[DEBUG] main() starting...")
+    sys.stdout.flush()
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
@@ -263,6 +265,15 @@ def main():
         wiz.show()
         _setup_keepalive[0] = wiz
     tray.on_run_setup.connect(_run_setup_again)
+
+    def _run_settings():
+        from ui.settings_dialog import show_settings
+        if show_settings():
+            # Prompt for restart or just reload?
+            # Re-loading .env at runtime is hard, so we just tell the user.
+            tray.show_notification("Clicky", "Settings saved. Please restart Clicky to apply changes.")
+    tray.on_run_settings.connect(_run_settings)
+    panel.on_run_settings.connect(_run_settings)
 
     def _save_diagnostics():
         import datetime, json, platform, traceback
