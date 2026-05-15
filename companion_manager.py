@@ -970,7 +970,19 @@ class CompanionManager(QObject):
                 search_task = asyncio.create_task(search(transcript))
 
             if screenshots and locate_triggered:
+                from PyQt6.QtGui import QCursor
+                cursor_pos = QCursor.pos()
+                cx, cy = cursor_pos.x(), cursor_pos.y()
+                
                 shot = screenshots[0]
+                for s in screenshots:
+                    log_w = s.physical_width / (s.dpi_scale if s.dpi_scale > 0 else 1.0)
+                    log_h = s.physical_height / (s.dpi_scale if s.dpi_scale > 0 else 1.0)
+                    if s.logical_left <= cx <= s.logical_left + log_w and \
+                       s.logical_top <= cy <= s.logical_top + log_h:
+                        shot = s
+                        break
+
                 if cfg.anthropic_api_key:
                     # Path A — Anthropic Computer Use (best accuracy)
                     from ai.element_locator import detect_element
@@ -982,6 +994,8 @@ class CompanionManager(QObject):
                         physical_height=shot.physical_height,
                         physical_left=shot.physical_left,
                         physical_top=shot.physical_top,
+                        logical_left=shot.logical_left,
+                        logical_top=shot.logical_top,
                         dpi_scale=shot.dpi_scale,
                         screen_index=shot.index,
                         user_question=transcript,
@@ -1000,6 +1014,8 @@ class CompanionManager(QObject):
                             physical_height=shot.physical_height,
                             physical_left=shot.physical_left,
                             physical_top=shot.physical_top,
+                            logical_left=shot.logical_left,
+                            logical_top=shot.logical_top,
                             dpi_scale=shot.dpi_scale,
                             screen_index=shot.index,
                             user_question=transcript,

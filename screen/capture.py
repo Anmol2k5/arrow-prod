@@ -49,27 +49,21 @@ class ScreenShot:
     logical_top: int
 
 
-def _query_dpi_scale() -> float:
-    """Best-effort DPI scale for the primary monitor.
-    Returns 1.0 if anything goes wrong."""
-    try:
-        # GetDpiForSystem returns DPI as integer (96 = 100%, 144 = 150%)
-        u = ctypes.windll.user32
-        u.SetProcessDPIAware()
-        gdfs = getattr(u, "GetDpiForSystem", None)
-        if gdfs:
-            return max(1.0, gdfs() / 96.0)
-        # Fallback: ratio of GetSystemMetrics(physical) vs (logical)
-        return 1.0
-    except Exception:
-        return 1.0
-
-
 def capture_all_screens(max_width: int = 1280) -> List[ScreenShot]:
     """Capture all monitors. Each ScreenShot carries everything needed
     to convert detection coords back into logical screen space."""
-    dpi = _query_dpi_scale()
     results = []
+    
+    # Attempt to get QScreen info for accurate logical mapping
+    screens = []
+    try:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app:
+            screens = app.screens()
+    except Exception:
+        pass
+
     with mss.mss() as sct:
         # mss monitor index 0 is the combined virtual screen; 1+ are real monitors
         for i, monitor in enumerate(sct.monitors[1:], start=1):
@@ -79,6 +73,30 @@ def capture_all_screens(max_width: int = 1280) -> List[ScreenShot]:
             phys_w, phys_h = img.width, img.height
             phys_left = int(monitor.get("left", 0))
             phys_top  = int(monitor.get("top",  0))
+            
+            # Match MSS monitor to QScreen by physical center
+            cx = phys_left + phys_w // 2
+            cy = phys_top + phys_h // 2
+            
+            dpi = 1.0
+            log_left = phys_left
+            log_top = phys_top
+            
+            for s in screens:
+                dpr = s.devicePixelRatio()
+                geo = s.geometry()
+                # On Windows with PyQt6, logical origin is roughly the physical origin.
+                # The physical bounding box of the QScreen is:
+                s_left = geo.x()
+                s_top = geo.y()
+                s_right = geo.x() + int(round(geo.width() * dpr))
+                s_bottom = geo.y() + int(round(geo.height() * dpr))
+                
+                if s_left <= cx <= s_right and s_top <= cy <= s_bottom:
+                    dpi = dpr
+                    log_left = geo.x()
+                    log_top = geo.y()
+                    break
 
             # Downscale only the JPEG we send to the LLM — keep physical numbers intact
             if img.width > max_width:
@@ -102,8 +120,8 @@ def capture_all_screens(max_width: int = 1280) -> List[ScreenShot]:
                 physical_left=phys_left,
                 physical_top=phys_top,
                 dpi_scale=dpi,
-                logical_left=int(round(phys_left / dpi)),
-                logical_top=int(round(phys_top  / dpi)),
+                logical_left=log_left,
+                logical_top=log_top,
             ))
 
     return results

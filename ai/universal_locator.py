@@ -235,6 +235,8 @@ async def detect_element_universal(
     physical_height: int | None = None,
     physical_left: int = 0,
     physical_top: int = 0,
+    logical_left: int = 0,
+    logical_top: int = 0,
     dpi_scale: float = 1.0,
 ) -> Optional[Detected]:
     """Locate the UI element matching `user_question` using ANY vision LLM.
@@ -340,15 +342,13 @@ async def detect_element_universal(
     frac_x = infer_x / iw
     frac_y = infer_y / ih
 
+    # Physical pixels inside this specific monitor
     px = frac_x * physical_width
     py = frac_y * physical_height
 
-    vx = px + physical_left
-    vy = py + physical_top
-
     s = dpi_scale if dpi_scale > 0 else 1.0
-    lx = int(round(vx / s))
-    ly = int(round(vy / s))
+    lx = int(round(px / s)) + logical_left
+    ly = int(round(py / s)) + logical_top
 
     print(
         f"[UniversalLocator] s1={s1_pick} s2={s2_pick} "
